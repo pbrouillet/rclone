@@ -178,15 +178,18 @@ Example: https://your-tenant.sharepoint.com/_api`,
 			Name: "web_auth",
 			Help: `Authenticate using a Microsoft first-party app via the web browser.
 
-When set, rclone acquires a token the same way the OneDrive/SharePoint web
-client does: a browser-based authorization-code flow (with PKCE) using a
-Microsoft first-party client ID that is pre-authorized in every tenant, and
-the SharePoint resource as the token audience.
+When set, rclone acquires a token the same way the OneDrive web client does: a
+browser-based authorization-code flow (with PKCE) using a Microsoft first-party
+client ID that is pre-authorized in every tenant.
 
-Use this for OneDrive for Business / SharePoint when your organization blocks
-rclone's own Azure AD application or won't grant admin consent. You must also
-set tenant_url to your SharePoint host so rclone knows which resource to
-request a token for (e.g. https://your-tenant-my.sharepoint.com/_api).
+For OneDrive for Business / SharePoint, also set tenant_url to your SharePoint
+host (e.g. https://your-tenant-my.sharepoint.com/_api); rclone then requests a
+token for that SharePoint resource. Use this when your organization blocks
+rclone's own Azure AD application or won't grant admin consent.
+
+For personal (consumer) OneDrive, leave tenant_url empty; rclone then requests
+a Microsoft Graph token, matching the default audience a personal account gets
+when browsing OneDrive on the web.
 
 Note: Microsoft first-party client IDs are undocumented and unsupported by
 Microsoft. They may change without notice. This is a best-effort option.`,
@@ -650,30 +653,43 @@ func makeOauthConfig(ctx context.Context, opt *Options) (*oauthutil.Config, erro
 }
 
 // makeWebAuthConfig turns oauthConfig into a first-party public-client config
-// that requests a token with the SharePoint resource as its audience, matching
-// what the OneDrive/SharePoint web client does. This works in tenants that
-// block rclone's own Azure AD application without needing admin consent.
+// that requests a token the same way the OneDrive web client does, so it works
+// in tenants that block rclone's own Azure AD application without needing admin
+// consent.
+//
+// The token audience depends on the kind of account:
+//   - OneDrive for Business / SharePoint: tenant_url is set, so the SharePoint
+//     resource (scheme://host) derived from it is used as the audience.
+//   - Personal (consumer) OneDrive: tenant_url is empty, so the Microsoft Graph
+//     endpoint for the region is used as the audience, matching the default
+//     audience a personal account gets when browsing OneDrive on the web.
 func makeWebAuthConfig(opt *Options, oauthConfig *oauthutil.Config) (*oauthutil.Config, error) {
-	if opt.TenantURL == "" {
-		return nil, errors.New("tenant_url must be set when using web_auth (e.g. https://your-tenant-my.sharepoint.com/_api)")
+	var resource string
+	if opt.TenantURL != "" {
+		// OneDrive for Business / SharePoint: derive the SharePoint resource
+		// (scheme://host) from tenant_url to use as the token audience.
+		u, err := url.Parse(opt.TenantURL)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return nil, fmt.Errorf("web_auth: could not derive SharePoint resource from tenant_url %q: %w", opt.TenantURL, err)
+		}
+		resource = u.Scheme + "://" + u.Host
+	} else {
+		// Personal (consumer) OneDrive: there is no SharePoint host, so use the
+		// Microsoft Graph endpoint for the region as the audience.
+		resource = graphAPIEndpoint[opt.Region]
+		if resource == "" {
+			resource = graphAPIEndpoint["global"]
+		}
 	}
-
-	// Derive the SharePoint resource (scheme://host) from tenant_url to use as
-	// the token audience.
-	u, err := url.Parse(opt.TenantURL)
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return nil, fmt.Errorf("web_auth: could not derive SharePoint resource from tenant_url %q: %w", opt.TenantURL, err)
-	}
-	resource := u.Scheme + "://" + u.Host
 
 	clientID := opt.WebAuthClientID
 	if clientID == "" {
 		clientID = webAuthClientID
 	}
 
-	// Public client: first-party client ID, no secret, SharePoint resource
-	// scopes and the OOB redirect (first-party clients accept it; the loopback
-	// and nativeclient redirects are usually not registered for them).
+	// Public client: first-party client ID, no secret, .default resource scopes
+	// and the OOB redirect (first-party clients accept it; the loopback and
+	// nativeclient redirects are usually not registered for them).
 	//
 	// Some desktops cannot open the urn: OOB redirect directly; see
 	// contrib/onedrive-oob-handler for a helper that captures the code.

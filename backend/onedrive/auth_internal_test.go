@@ -10,7 +10,8 @@ import (
 )
 
 // TestMakeOauthConfigWebAuth checks that web_auth produces a first-party
-// public-client config with the SharePoint resource audience and OOB redirect.
+// public-client config with the correct resource audience (SharePoint when
+// tenant_url is set, Microsoft Graph for personal accounts) and OOB redirect.
 func TestMakeOauthConfigWebAuth(t *testing.T) {
 	ctx := context.Background()
 
@@ -60,15 +61,30 @@ func TestMakeOauthConfigWebAuth(t *testing.T) {
 		assert.Equal(t, webAuthClientID, conf.ClientID)
 	})
 
-	t.Run("MissingTenantURLFails", func(t *testing.T) {
+	t.Run("NoTenantURLUsesGraphConsumer", func(t *testing.T) {
 		opt := &Options{
 			Region:       regionGlobal,
 			WebAuth:      true,
 			AccessScopes: scopeAccess,
 		}
-		_, err := makeOauthConfig(ctx, opt)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "tenant_url")
+		conf, err := makeOauthConfig(ctx, opt)
+		require.NoError(t, err)
+
+		assert.Equal(t, webAuthClientID, conf.ClientID)
+		assert.Empty(t, conf.ClientSecret)
+		assert.Equal(t, oauthutil.TitleBarRedirectURL, conf.RedirectURL)
+		assert.Equal(t, []string{"https://graph.microsoft.com/.default", "offline_access"}, []string(conf.Scopes))
+	})
+
+	t.Run("NoTenantURLUsesGraphConsumerUSRegion", func(t *testing.T) {
+		opt := &Options{
+			Region:       regionUS,
+			WebAuth:      true,
+			AccessScopes: scopeAccess,
+		}
+		conf, err := makeOauthConfig(ctx, opt)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"https://graph.microsoft.us/.default", "offline_access"}, []string(conf.Scopes))
 	})
 
 	t.Run("InvalidTenantURLFails", func(t *testing.T) {

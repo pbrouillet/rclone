@@ -275,26 +275,36 @@ expire and you will need to repeat the process to obtain a new one.
 #### Browser-based access with `web_auth`
 
 Instead of manually extracting a token, you can let rclone acquire one
-the same way the OneDrive/SharePoint web client does. Setting the
-`web_auth` option makes rclone run a browser-based authorization-code
-flow (with PKCE) using a Microsoft **first-party client ID** that is
-pre-authorized in every tenant, requesting a token whose audience is
-the **SharePoint resource**. This needs no app registration and no
-admin consent, so it works in tenants that block rclone's own Azure AD
-application.
+the same way the OneDrive web client does. Setting the `web_auth` option
+makes rclone run a browser-based authorization-code flow (with PKCE)
+using a Microsoft **first-party client ID** that is pre-authorized in
+every tenant. This needs no app registration and no admin consent, so it
+works in tenants that block rclone's own Azure AD application.
 
-You still need to set `tenant_url` to your SharePoint host so rclone
-knows which resource to request a token for. rclone derives the token
-audience (and hence the scope) from the scheme and host of
-`tenant_url`, e.g. `https://your-tenant-my.sharepoint.com` for personal
-OneDrive for Business, or `https://your-tenant.sharepoint.com` for a
-SharePoint site.
+The token audience depends on the kind of account:
+
+- **OneDrive for Business / SharePoint**: also set `tenant_url` to your
+  SharePoint host. rclone derives the token audience (and hence the
+  scope) from the scheme and host of `tenant_url`, e.g.
+  `https://your-tenant-my.sharepoint.com` for OneDrive for Business, or
+  `https://your-tenant.sharepoint.com` for a SharePoint site.
+- **Personal (consumer) OneDrive**: leave `tenant_url` empty. rclone
+  then requests a **Microsoft Graph** token, matching the default
+  audience a personal account gets when browsing OneDrive on the web.
 
 ```ini
+# OneDrive for Business / SharePoint
 type = onedrive
 web_auth = true
 tenant_url = https://your-tenant-my.sharepoint.com/_api
 drive_type = business
+```
+
+```ini
+# Personal (consumer) OneDrive
+type = onedrive
+web_auth = true
+drive_type = personal
 ```
 
 When you run `rclone config`, rclone opens (or prints) a sign-in URL;
@@ -574,15 +584,18 @@ Properties:
 
 Authenticate using a Microsoft first-party app via the web browser.
 
-When set, rclone acquires a token the same way the OneDrive/SharePoint web
-client does: a browser-based authorization-code flow (with PKCE) using a
-Microsoft first-party client ID that is pre-authorized in every tenant, and
-the SharePoint resource as the token audience.
+When set, rclone acquires a token the same way the OneDrive web client does: a
+browser-based authorization-code flow (with PKCE) using a Microsoft first-party
+client ID that is pre-authorized in every tenant.
 
-Use this for OneDrive for Business / SharePoint when your organization blocks
-rclone's own Azure AD application or won't grant admin consent. You must also
-set tenant_url to your SharePoint host so rclone knows which resource to
-request a token for (e.g. https://your-tenant-my.sharepoint.com/_api).
+For OneDrive for Business / SharePoint, also set tenant_url to your SharePoint
+host (e.g. https://your-tenant-my.sharepoint.com/_api); rclone then requests a
+token for that SharePoint resource. Use this when your organization blocks
+rclone's own Azure AD application or won't grant admin consent.
+
+For personal (consumer) OneDrive, leave tenant_url empty; rclone then requests
+a Microsoft Graph token, matching the default audience a personal account gets
+when browsing OneDrive on the web.
 
 Note: Microsoft first-party client IDs are undocumented and unsupported by
 Microsoft. They may change without notice. This is a best-effort option.
