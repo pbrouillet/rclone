@@ -46,6 +46,11 @@ const (
 	// prompting the user to copy the code and paste it in the application.
 	TitleBarRedirectURL = "urn:ietf:wg:oauth:2.0:oob"
 
+	// configPKCEVerifier is the transient config key used to carry the PKCE
+	// code verifier between generating the authorization URL and exchanging
+	// the code for a token. It is cleared once the exchange completes.
+	configPKCEVerifier = "config_pkce_verifier"
+
 	// bindPort is the port that we bind the local webserver to
 	bindPort = "53682"
 
@@ -571,11 +576,13 @@ type CheckAuthFn func(*Config, *AuthResult) error
 
 // Options for the oauth config
 type Options struct {
-	OAuth2Config *Config                 // Basic config for oauth2
-	NoOffline    bool                    // If set then "access_type=offline" parameter is not passed
-	CheckAuth    CheckAuthFn             // When the AuthResult is known the checkAuth function is called if set
-	OAuth2Opts   []oauth2.AuthCodeOption // extra oauth2 options
-	StateBlankOK bool                    // If set, state returned as "" is deemed to be OK
+	OAuth2Config   *Config                 // Basic config for oauth2
+	NoOffline      bool                    // If set then "access_type=offline" parameter is not passed
+	CheckAuth      CheckAuthFn             // When the AuthResult is known the checkAuth function is called if set
+	OAuth2Opts     []oauth2.AuthCodeOption // extra oauth2 options
+	StateBlankOK   bool                    // If set, state returned as "" is deemed to be OK
+	UsePKCE        bool                    // If set, use PKCE (S256) for the authorization code flow
+	ForcePasteFlow bool                    // If set, skip the local webserver and always use the OOB copy/paste flow
 }
 
 // ConfigOut returns a config item suitable for the backend config
@@ -647,6 +654,12 @@ func ConfigOAuth(ctx context.Context, name string, m configmap.Mapper, ri *fs.Re
 		if oauthConfig.ClientCredentialFlow {
 			// If using client credential flow, skip straight to getting the token since we don't need a browser
 			return fs.ConfigGoto(newState("*oauth-do"))
+		}
+		if opt.ForcePasteFlow {
+			// The OAuth config requires the OOB copy/paste flow (e.g. the
+			// redirect URL is not a loopback address), so skip the local
+			// webserver question and go straight to the paste flow.
+			return fs.ConfigGoto(newState("*oauth-remote"))
 		}
 		return fs.ConfigConfirm(newState("*oauth-islocal"), true, "config_is_local", "Use web browser to automatically authenticate rclone with remote?\n * Say Y if the machine running rclone has a web browser you can use\n * Say N if running rclone on a (remote) machine without web browser access\nIf not sure try Y. If Y failed, try N.\n")
 	case "*oauth-islocal":
@@ -759,7 +772,7 @@ version recommended):
 					return nil, fmt.Errorf("config failed to refresh token: %w", err)
 				}
 			}
-			err = configExchange(ctx, name, m, oauthConfig, code)
+			err = configExchange(ctx, name, m, oauthConfig, code, opt)
 			if err != nil {
 				return nil, err
 			}
@@ -860,6 +873,14 @@ func getAuthURL(name string, m configmap.Mapper, oauthConfig *Config, opt *Optio
 	opts := opt.OAuth2Opts
 	if !opt.NoOffline {
 		opts = append(opts, oauth2.AccessTypeOffline)
+	}
+	if opt.UsePKCE {
+		// Generate a PKCE code verifier, store it so configExchange can
+		// recover it (the two halves may run in separate FSM invocations),
+		// and add the S256 challenge to the authorization URL.
+		verifier := oauth2.GenerateVerifier()
+		m.Set(configPKCEVerifier, verifier)
+		opts = append(opts, oauth2.S256ChallengeOption(verifier))
 	}
 	authURL = oauth2Conf.AuthCodeURL(state, opts...)
 	return authURL, state, nil
@@ -975,13 +996,25 @@ func configSetup(ctx context.Context, id, name string, m configmap.Mapper, oauth
 }
 
 // Exchange the code for a token
-func configExchange(ctx context.Context, name string, m configmap.Mapper, oauthConfig *Config, code string) error {
+func configExchange(ctx context.Context, name string, m configmap.Mapper, oauthConfig *Config, code string, opt *Options) error {
 	ctx = Context(ctx, fshttp.NewClient(ctx))
 
 	// Create the configuration required for the OAuth flow
 	oauth2Conf := oauthConfig.MakeOauth2Config()
 
-	token, err := oauth2Conf.Exchange(ctx, code)
+	var exchangeOpts []oauth2.AuthCodeOption
+	if opt != nil && opt.UsePKCE {
+		// Recover the PKCE code verifier stored by getAuthURL and clear it
+		// from the config once we are done with it.
+		verifier, _ := m.Get(configPKCEVerifier)
+		defer m.Set(configPKCEVerifier, "")
+		if verifier == "" {
+			return errors.New("failed to get token: PKCE code verifier not found")
+		}
+		exchangeOpts = append(exchangeOpts, oauth2.VerifierOption(verifier))
+	}
+
+	token, err := oauth2Conf.Exchange(ctx, code, exchangeOpts...)
 	if err != nil {
 		return fmt.Errorf("failed to get token: %w", err)
 	}

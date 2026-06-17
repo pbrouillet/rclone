@@ -46,17 +46,22 @@ import (
 const (
 	rcloneClientID              = "b15665d9-eda6-4092-8539-0eec376afd59"
 	rcloneEncryptedClientSecret = "_JUdzh3LnKNqSPcf4Wu5fgMFIQOI8glZu_akYgR8yf6egowNBg-R"
-	minSleep                    = 10 * time.Millisecond
-	maxSleep                    = 2 * time.Second
-	decayConstant               = 2 // bigger for slower decay, exponential
-	configDriveID               = "drive_id"
-	configDriveType             = "drive_type"
-	driveTypePersonal           = "personal"
-	driveTypeBusiness           = "business"
-	driveTypeSharepoint         = "documentLibrary"
-	defaultChunkSize            = 10 * fs.Mebi
-	chunkSizeMultiple           = 320 * fs.Kibi
-	maxSinglePartSize           = 4 * fs.Mebi
+	// webAuthClientID is the default Microsoft first-party (Office) client ID
+	// used for the web_auth browser flow. It is pre-authorized in every tenant
+	// so no app registration or admin consent is required. It can be overridden
+	// via the web_auth_client_id option.
+	webAuthClientID     = "d3590ed6-52b3-4102-aeff-aad2292ab01c"
+	minSleep            = 10 * time.Millisecond
+	maxSleep            = 2 * time.Second
+	decayConstant       = 2 // bigger for slower decay, exponential
+	configDriveID       = "drive_id"
+	configDriveType     = "drive_type"
+	driveTypePersonal   = "personal"
+	driveTypeBusiness   = "business"
+	driveTypeSharepoint = "documentLibrary"
+	defaultChunkSize    = 10 * fs.Mebi
+	chunkSizeMultiple   = 320 * fs.Kibi
+	maxSinglePartSize   = 4 * fs.Mebi
 
 	regionGlobal = "global"
 	regionUS     = "us"
@@ -169,6 +174,33 @@ for "driveAccessToken" in the network requests. Look for the
 Example: https://your-tenant.sharepoint.com/_api`,
 			Default:  "",
 			Advanced: true,
+		}, {
+			Name: "web_auth",
+			Help: `Authenticate using a Microsoft first-party app via the web browser.
+
+When set, rclone acquires a token the same way the OneDrive/SharePoint web
+client does: a browser-based authorization-code flow (with PKCE) using a
+Microsoft first-party client ID that is pre-authorized in every tenant, and
+the SharePoint resource as the token audience.
+
+Use this for OneDrive for Business / SharePoint when your organization blocks
+rclone's own Azure AD application or won't grant admin consent. You must also
+set tenant_url to your SharePoint host so rclone knows which resource to
+request a token for (e.g. https://your-tenant-my.sharepoint.com/_api).
+
+Note: Microsoft first-party client IDs are undocumented and unsupported by
+Microsoft. They may change without notice. This is a best-effort option.`,
+			Default:  false,
+			Advanced: true,
+		}, {
+			Name: "web_auth_client_id",
+			Help: `The Microsoft first-party client ID to use for web_auth.
+
+Only used when web_auth is set. Defaults to the Microsoft Office client ID,
+which is pre-authorized in every tenant and registers the OOB redirect URI.`,
+			Default:   webAuthClientID,
+			Advanced:  true,
+			Sensitive: true,
 		}, {
 			Name: "chunk_size",
 			Help: `Chunk size to upload files with - must be multiple of 320k (327,680 bytes).
@@ -600,6 +632,11 @@ func makeOauthConfig(ctx context.Context, opt *Options) (*oauthutil.Config, erro
 	oauthConfig.TokenURL = authEndpoint[opt.Region] + prefix + tokenPath
 	oauthConfig.AuthURL = authEndpoint[opt.Region] + prefix + authPath
 
+	// Check to see if we are using the web (first-party) auth flow
+	if opt.WebAuth {
+		return makeWebAuthConfig(opt, &oauthConfig)
+	}
+
 	// Check to see if we are using client credentials flow
 	if opt.ClientCredentials {
 		// Override scope to .default
@@ -610,6 +647,42 @@ func makeOauthConfig(ctx context.Context, opt *Options) (*oauthutil.Config, erro
 	}
 
 	return &oauthConfig, nil
+}
+
+// makeWebAuthConfig turns oauthConfig into a first-party public-client config
+// that requests a token with the SharePoint resource as its audience, matching
+// what the OneDrive/SharePoint web client does. This works in tenants that
+// block rclone's own Azure AD application without needing admin consent.
+func makeWebAuthConfig(opt *Options, oauthConfig *oauthutil.Config) (*oauthutil.Config, error) {
+	if opt.TenantURL == "" {
+		return nil, errors.New("tenant_url must be set when using web_auth (e.g. https://your-tenant-my.sharepoint.com/_api)")
+	}
+
+	// Derive the SharePoint resource (scheme://host) from tenant_url to use as
+	// the token audience.
+	u, err := url.Parse(opt.TenantURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return nil, fmt.Errorf("web_auth: could not derive SharePoint resource from tenant_url %q: %w", opt.TenantURL, err)
+	}
+	resource := u.Scheme + "://" + u.Host
+
+	clientID := opt.WebAuthClientID
+	if clientID == "" {
+		clientID = webAuthClientID
+	}
+
+	// Public client: first-party client ID, no secret, SharePoint resource
+	// scopes and the OOB redirect (first-party clients accept it; the loopback
+	// and nativeclient redirects are usually not registered for them).
+	//
+	// Some desktops cannot open the urn: OOB redirect directly; see
+	// contrib/onedrive-oob-handler for a helper that captures the code.
+	oauthConfig.ClientID = clientID
+	oauthConfig.ClientSecret = ""
+	oauthConfig.Scopes = fs.SpaceSepList{resource + "/.default", "offline_access"}
+	oauthConfig.RedirectURL = oauthutil.TitleBarRedirectURL
+
+	return oauthConfig, nil
 }
 
 // Config the backend
@@ -628,10 +701,16 @@ func Config(ctx context.Context, name string, m configmap.Mapper, conf fs.Config
 			return nil, err
 		}
 		return oauthutil.ConfigOut("choose_type", &oauthutil.Options{
-			OAuth2Config: conf,
+			OAuth2Config:   conf,
+			UsePKCE:        opt.WebAuth,
+			ForcePasteFlow: opt.WebAuth,
 		})
 	}
 
+	oauthConfig, err := makeOauthConfig(ctx, opt)
+	if err != nil {
+		return nil, err
+	}
 	oAuthClient, _, err := oauthutil.NewClient(ctx, name, m, oauthConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to configure OneDrive: %w", err)
@@ -788,6 +867,8 @@ type Options struct {
 	UploadCutoff            fs.SizeSuffix        `config:"upload_cutoff"`
 	ChunkSize               fs.SizeSuffix        `config:"chunk_size"`
 	TenantURL               string               `config:"tenant_url"`
+	WebAuth                 bool                 `config:"web_auth"`
+	WebAuthClientID         string               `config:"web_auth_client_id"`
 	DriveID                 string               `config:"drive_id"`
 	DriveType               string               `config:"drive_type"`
 	RootFolderID            string               `config:"root_folder_id"`

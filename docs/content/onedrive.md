@@ -272,6 +272,51 @@ Since the exact expiry time cannot be determined from web traffic,
 set the expiry to a future date. Note that the token will eventually
 expire and you will need to repeat the process to obtain a new one.
 
+#### Browser-based access with `web_auth`
+
+Instead of manually extracting a token, you can let rclone acquire one
+the same way the OneDrive/SharePoint web client does. Setting the
+`web_auth` option makes rclone run a browser-based authorization-code
+flow (with PKCE) using a Microsoft **first-party client ID** that is
+pre-authorized in every tenant, requesting a token whose audience is
+the **SharePoint resource**. This needs no app registration and no
+admin consent, so it works in tenants that block rclone's own Azure AD
+application.
+
+You still need to set `tenant_url` to your SharePoint host so rclone
+knows which resource to request a token for. rclone derives the token
+audience (and hence the scope) from the scheme and host of
+`tenant_url`, e.g. `https://your-tenant-my.sharepoint.com` for personal
+OneDrive for Business, or `https://your-tenant.sharepoint.com` for a
+SharePoint site.
+
+```ini
+type = onedrive
+web_auth = true
+tenant_url = https://your-tenant-my.sharepoint.com/_api
+drive_type = business
+```
+
+When you run `rclone config`, rclone opens (or prints) a sign-in URL;
+after you authenticate it stores a token with a refresh token and
+refreshes it transparently. The first-party client ID can be overridden
+with `web_auth_client_id` if needed.
+
+After signing in, the authorization code is returned via the
+`urn:ietf:wg:oauth:2.0:oob` redirect: the code is shown on the page (and
+in the browser title bar) for you to copy and paste into rclone's
+"Verification code" prompt.
+
+Some Linux desktops cannot open the `urn:` scheme directly and instead
+hand it to an external handler. An optional helper in
+`contrib/onedrive-oob-handler` registers itself for that scheme and
+copies the code to your clipboard automatically — see its `README.md`.
+
+**NOTE** Microsoft first-party client IDs are undocumented and
+unsupported by Microsoft. They may stop working without notice. Treat
+`web_auth` as a best-effort option for when the standard Graph flow is
+unavailable.
+
 ### Modification times and hashes
 
 OneDrive allows modification times to be set on objects accurate to 1
@@ -503,6 +548,65 @@ Properties:
 - Env Var:     RCLONE_ONEDRIVE_UPLOAD_CUTOFF
 - Type:        SizeSuffix
 - Default:     off
+
+#### --onedrive-tenant-url
+
+The tenant URL for non-admin OneDrive access.
+
+Set this to your SharePoint tenant URL to use the SharePoint v2.0 API
+endpoint instead of the standard Microsoft Graph API. This allows
+accessing business OneDrive without admin consent.
+
+The URL can be found in your browser's developer tools by searching
+for "driveAccessToken" in the network requests. Look for the
+".driveUrl" field which contains the tenant URL and drive ID.
+
+Example: https://your-tenant.sharepoint.com/_api
+
+Properties:
+
+- Config:      tenant_url
+- Env Var:     RCLONE_ONEDRIVE_TENANT_URL
+- Type:        string
+- Required:    false
+
+#### --onedrive-web-auth
+
+Authenticate using a Microsoft first-party app via the web browser.
+
+When set, rclone acquires a token the same way the OneDrive/SharePoint web
+client does: a browser-based authorization-code flow (with PKCE) using a
+Microsoft first-party client ID that is pre-authorized in every tenant, and
+the SharePoint resource as the token audience.
+
+Use this for OneDrive for Business / SharePoint when your organization blocks
+rclone's own Azure AD application or won't grant admin consent. You must also
+set tenant_url to your SharePoint host so rclone knows which resource to
+request a token for (e.g. https://your-tenant-my.sharepoint.com/_api).
+
+Note: Microsoft first-party client IDs are undocumented and unsupported by
+Microsoft. They may change without notice. This is a best-effort option.
+
+Properties:
+
+- Config:      web_auth
+- Env Var:     RCLONE_ONEDRIVE_WEB_AUTH
+- Type:        bool
+- Default:     false
+
+#### --onedrive-web-auth-client-id
+
+The Microsoft first-party client ID to use for web_auth.
+
+Only used when web_auth is set. Defaults to the Microsoft Office client ID,
+which is pre-authorized in every tenant and registers the OOB redirect URI.
+
+Properties:
+
+- Config:      web_auth_client_id
+- Env Var:     RCLONE_ONEDRIVE_WEB_AUTH_CLIENT_ID
+- Type:        string
+- Default:     "d3590ed6-52b3-4102-aeff-aad2292ab01c"
 
 #### --onedrive-chunk-size
 

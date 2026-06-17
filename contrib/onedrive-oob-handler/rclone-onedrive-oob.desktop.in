@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=rclone OneDrive OOB Handler
+Comment=Copies the OAuth out-of-band authorization code to the clipboard
+Exec=@HANDLER_PATH@ %u
+Terminal=false
+NoDisplay=true
+MimeType=x-scheme-handler/urn;
